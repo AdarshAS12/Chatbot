@@ -487,4 +487,4 @@ async function askWeight(user) {
 /////////////////////////////////////////////////////
 // START
 /////////////////////////////////////////////////////
-app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
+app.listen(1000, () => console.log("🚀 Server running on port 1000"));
