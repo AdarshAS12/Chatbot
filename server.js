@@ -246,19 +246,23 @@ app.post("/webhook", async (req, res) => {
 function getNextDates(days) {
   const arr = [];
   const now = new Date();
-  const hour = now.getHours();
 
-  const today = new Date().toLocaleDateString("en-CA");
+  const istTime = new Date(
+    now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })
+  );
+
+  const hour = istTime.getHours();
+  const today = istTime.toISOString().split("T")[0];
 
   if (hour < 12) {
     arr.push(today);
   }
 
   for (let i = 1; i <= days; i++) {
-    const d = new Date();
+    const d = new Date(istTime);
     d.setDate(d.getDate() + i);
 
-    arr.push(d.toLocaleDateString("en-CA"));
+    arr.push(d.toISOString().split("T")[0]);
   }
 
   return arr;
@@ -300,9 +304,13 @@ async function askDate(user) {
 async function askTime(user) {
   const selectedDate = users[user].deliveryDate;
   const now = new Date();
-  const today = now.toLocaleDateString("en-CA");
-  const hour = now.getHours();
 
+const istTime = new Date(
+  now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })
+);
+
+const today = istTime.toISOString().split("T")[0];
+const hour = istTime.getHours();
   let times = [];
 
   if (selectedDate === today) {
@@ -483,5 +491,4 @@ async function askWeight(user) {
     { headers: { Authorization: `Bearer ${TOKEN}` } }
   );
 }
-
 app.listen(PORT, () => console.log(`🚀 Running on ${PORT}`));
