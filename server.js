@@ -97,7 +97,6 @@ app.post("/webhook", async (req, res) => {
 
         users[from] = { step: "START" };
 
-        // ❗ NOT CHANGED (as requested)
         await sendText(
           from,
           "Welcome to Anumod Bakery! 🍞✨\nWe’re delighted to have you here. Enjoy our freshly baked treats made with love—your happiness is our sweetest recipe! 😊"
@@ -242,21 +241,24 @@ app.post("/webhook", async (req, res) => {
 });
 
 /////////////////////////////////////////////////////
-// DATE
+// DATE (FIXED)
 /////////////////////////////////////////////////////
 function getNextDates(days) {
   const arr = [];
   const now = new Date();
   const hour = now.getHours();
 
+  const today = new Date().toLocaleDateString("en-CA");
+
   if (hour < 12) {
-    arr.push(new Date().toISOString().split("T")[0]);
+    arr.push(today);
   }
 
   for (let i = 1; i <= days; i++) {
     const d = new Date();
     d.setDate(d.getDate() + i);
-    arr.push(d.toISOString().split("T")[0]);
+
+    arr.push(d.toLocaleDateString("en-CA"));
   }
 
   return arr;
@@ -293,12 +295,12 @@ async function askDate(user) {
 }
 
 /////////////////////////////////////////////////////
-// TIME
+// TIME (FIXED)
 /////////////////////////////////////////////////////
 async function askTime(user) {
   const selectedDate = users[user].deliveryDate;
   const now = new Date();
-  const today = now.toISOString().split("T")[0];
+  const today = now.toLocaleDateString("en-CA");
   const hour = now.getHours();
 
   let times = [];
@@ -346,8 +348,9 @@ async function askTime(user) {
 }
 
 /////////////////////////////////////////////////////
-// SUMMARY
+// REMAINING CODE UNCHANGED
 /////////////////////////////////////////////////////
+
 function getPrices(item, weight) {
   const map = { "1kg":1,"2kg":2,"3kg":3,"4kg":4,"5kg":5 };
   const m = map[weight] || 1;
@@ -419,9 +422,6 @@ async function sendSummary(user) {
   );
 }
 
-/////////////////////////////////////////////////////
-// UTIL
-/////////////////////////////////////////////////////
 async function sendText(to, msg) {
   await axios.post(
     `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`,
@@ -484,7 +484,4 @@ async function askWeight(user) {
   );
 }
 
-/////////////////////////////////////////////////////
-// START
-/////////////////////////////////////////////////////
 app.listen(PORT, () => console.log(`🚀 Running on ${PORT}`));
