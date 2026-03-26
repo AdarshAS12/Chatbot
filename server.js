@@ -17,31 +17,13 @@ let catalogCache = {};
 let processedMessages = new Set();
 
 /////////////////////////////////////////////////////
-// PRICE EXTRACTOR
-/////////////////////////////////////////////////////
-
-function extractPrice(p) {
-  if (!p) return 0;
-
-  if (typeof p === "string") {
-    return parseFloat(p.replace(/[^\d.]/g, ""));
-  }
-
-  if (typeof p === "object" && p.amount) {
-    return parseFloat(p.amount) / 100;
-  }
-
-  return 0;
-}
-
-/////////////////////////////////////////////////////
 // LOAD CATALOG
 /////////////////////////////////////////////////////
 
 async function loadCatalog() {
   try {
     const res = await axios.get(
-      `https://graph.facebook.com/v22.0/${CATALOG_ID}/products?fields=name,retailer_id,price,sale_price`,
+      `https://graph.facebook.com/v22.0/${CATALOG_ID}/products?fields=name,retailer_id,price`,
       {
         headers: { Authorization: `Bearer ${TOKEN}` }
       }
@@ -50,21 +32,14 @@ async function loadCatalog() {
     catalogCache = {};
 
     res.data.data.forEach(product => {
-      const basePrice = extractPrice(product.price);
-      const salePrice = extractPrice(product.sale_price);
-
       catalogCache[product.retailer_id] = {
-        name: product.name,
-        id: product.name.toUpperCase().replace(/\s/g, "_"),
-        basePrice: basePrice || 500,
-        salePrice: salePrice || 0
+        name: product.name
       };
     });
 
     console.log("✅ Catalog loaded");
-
   } catch (err) {
-    console.log("❌ Catalog error:", err.response?.data || err.message);
+    console.log("❌ Catalog error:", err.message);
   }
 }
 
@@ -90,6 +65,9 @@ app.get("/webhook", (req, res) => {
 /////////////////////////////////////////////////////
 
 app.post("/webhook", async (req, res) => {
+  console.log("FULL BODY:");
+  console.log(JSON.stringify(req.body, null, 2));
+
   try {
     const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!message) return res.sendStatus(200);
@@ -103,19 +81,13 @@ app.post("/webhook", async (req, res) => {
 
     const from = message.from;
 
-    console.log("Incoming:", message);
-
     if (message.type === "text") {
       const text = message.text.body.toLowerCase();
 
-      if (["hi","hii","hai","hello","menu","start"].includes(text)) {
+      if (["hi", "hello", "menu", "start"].includes(text)) {
         users[from] = {};
 
-        await sendText(
-          from,
-          "Welcome to Anumod Bakery! 🍞✨\nFresh cakes made with love 🎂"
-        );
-
+        await sendText(from, "Welcome to Anumod Bakery 🎂");
         await sendCatalog(from);
       }
 
@@ -132,9 +104,8 @@ app.post("/webhook", async (req, res) => {
           await askWeight(from);
         } else {
           user.step = "ASK_NAME";
-          await sendText(from, "👤 Enter your name");
+          await sendText(from, "Enter your name");
         }
-
         return res.sendStatus(200);
       }
 
@@ -146,17 +117,13 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (message.type === "order") {
-
       const cart = message.order.product_items.map(item => {
         const product = catalogCache[item.product_retailer_id];
 
         return {
-          itemId: product?.id || "CAKE",
           name: product?.name || "Cake",
           quantity: item.quantity,
           weight: null,
-          basePrice: product?.basePrice || 500,
-          salePrice: product?.salePrice || 0,
           customMessage: ""
         };
       });
@@ -165,15 +132,13 @@ app.post("/webhook", async (req, res) => {
         items: cart,
         currentIndex: 0,
         step: "ASK_WEIGHT",
-        phone: "+" + from,
-        confirmed: false
+        phone: "+" + from
       };
 
       await askWeight(from);
     }
 
     if (message.type === "interactive") {
-
       const id =
         message.interactive.button_reply?.id ||
         message.interactive.list_reply?.id;
@@ -181,88 +146,52 @@ app.post("/webhook", async (req, res) => {
       const user = users[from];
 
       if (!user) {
-        await sendText(from, "⚠️ Session expired. Type Hi to restart.");
+        await sendText(from, "Session expired. Type Hi");
         return res.sendStatus(200);
       }
 
-      if (["1KG","2KG","3KG","4KG","5KG"].includes(id)) {
+      if (["1KG", "2KG", "3KG"].includes(id)) {
         const item = user.items[user.currentIndex];
-        item.weight = id.toLowerCase();
+        item.weight = id;
 
         user.step = "ASK_MESSAGE";
 
-        await sendText(
-          from,
-          `✍️ Message for ${item.name}? (type no if none)`
-        );
-
+        await sendText(from, `Message for ${item.name}? (type no)`);
         return res.sendStatus(200);
       }
 
       if (id.startsWith("DATE_")) {
-        user.deliveryDate = id.replace("DATE_", "");
+        user.deliveryDate = id;
         await askTime(from);
         return res.sendStatus(200);
       }
 
       if (id.startsWith("TIME_")) {
-        user.deliveryTime = id.replace("TIME_", "");
+        user.deliveryTime = id;
         await sendSummary(from);
         return res.sendStatus(200);
       }
 
       if (id === "CONFIRM_ORDER") {
-
-        if (!user || user.confirmed) {
-          return res.sendStatus(200);
-        }
-
-        user.confirmed = true;
-
-        await sendText(from, "⏳ Processing your order...");
-
-        try {
-          for (const item of user.items) {
-
-            await axios.post(process.env.ORDER_API, {
-              itemId: item.itemId,
-              customerNumber: user.phone,
-              customerName: user.customerName,
-              deliveryDate: user.deliveryDate,
-              deliveryTime: user.deliveryTime,
-              weight: item.weight,
-              message: item.customMessage
-            });
-          }
-
-          await sendText(
-            from,
-            "✅ Order placed successfully! 😊\nType Hi to order again"
-          );
-
-        } catch (e) {
-          user.confirmed = false;
-          await sendText(from, "❌ Order failed. Try again.");
-          return res.sendStatus(200);
-        }
-
+        await sendText(from, "Order placed successfully ✅");
         delete users[from];
       }
 
       if (id === "CANCEL_ORDER") {
         delete users[from];
-        await sendText(from, "❌ Order cancelled");
+        await sendText(from, "Order cancelled ❌");
       }
     }
 
     res.sendStatus(200);
-
   } catch (err) {
     console.log(err);
     res.sendStatus(500);
   }
 });
 
+/////////////////////////////////////////////////////
+// FUNCTIONS
 /////////////////////////////////////////////////////
 
 async function sendText(to, msg) {
@@ -286,7 +215,7 @@ async function sendCatalog(to) {
       type: "interactive",
       interactive: {
         type: "catalog_message",
-        body: { text: "🍰 View cakes" },
+        body: { text: "View cakes" },
         action: { name: "catalog_message" }
       }
     },
@@ -305,7 +234,7 @@ async function askWeight(user) {
       type: "interactive",
       interactive: {
         type: "list",
-        body: { text: `🎂 Select weight for ${item.name}` },
+        body: { text: `Select weight for ${item.name}` },
         action: {
           button: "Choose",
           sections: [
@@ -314,9 +243,7 @@ async function askWeight(user) {
               rows: [
                 { id: "1KG", title: "1 KG" },
                 { id: "2KG", title: "2 KG" },
-                { id: "3KG", title: "3 KG" },
-                { id: "4KG", title: "4 KG" },
-                { id: "5KG", title: "5 KG" }
+                { id: "3KG", title: "3 KG" }
               ]
             }
           ]
@@ -327,4 +254,95 @@ async function askWeight(user) {
   );
 }
 
-app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
+async function askDate(to) {
+  await axios.post(
+    `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "list",
+        body: { text: "Select delivery date" },
+        action: {
+          button: "Choose",
+          sections: [
+            {
+              title: "Dates",
+              rows: [
+                { id: "DATE_TODAY", title: "Today" },
+                { id: "DATE_TOMORROW", title: "Tomorrow" }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    { headers: { Authorization: `Bearer ${TOKEN}` } }
+  );
+}
+
+async function askTime(to) {
+  await axios.post(
+    `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "list",
+        body: { text: "Select delivery time" },
+        action: {
+          button: "Choose",
+          sections: [
+            {
+              title: "Time",
+              rows: [
+                { id: "TIME_MORNING", title: "Morning" },
+                { id: "TIME_EVENING", title: "Evening" }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    { headers: { Authorization: `Bearer ${TOKEN}` } }
+  );
+}
+
+async function sendSummary(to) {
+  const user = users[to];
+
+  let summary = "Order Summary:\n\n";
+
+  user.items.forEach(item => {
+    summary += `${item.name} (${item.weight})\n`;
+    if (item.customMessage) summary += `Message: ${item.customMessage}\n`;
+  });
+
+  summary += `\nName: ${user.customerName}`;
+  summary += `\nDate: ${user.deliveryDate}`;
+  summary += `\nTime: ${user.deliveryTime}`;
+
+  await axios.post(
+    `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: summary },
+        action: {
+          buttons: [
+            { type: "reply", reply: { id: "CONFIRM_ORDER", title: "Confirm" } },
+            { type: "reply", reply: { id: "CANCEL_ORDER", title: "Cancel" } }
+          ]
+        }
+      }
+    },
+    { headers: { Authorization: `Bearer ${TOKEN}` } }
+  );
+}
+
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
