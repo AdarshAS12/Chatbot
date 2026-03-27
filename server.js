@@ -5,8 +5,6 @@ require("dotenv").config();
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 1000;
-
 const TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
@@ -16,33 +14,32 @@ let users = {};
 let catalogCache = {};
 const processedMessages = new Set();
 
+/////////////////////////////////////////////////////
+// PREVENT DUPLICATES
+/////////////////////////////////////////////////////
 setInterval(() => processedMessages.clear(), 600000);
 
 /////////////////////////////////////////////////////
-// LOAD CATALOG (WITH DISCOUNT)
+// LOAD CATALOG
 /////////////////////////////////////////////////////
 async function loadCatalog() {
   try {
     const res = await axios.get(
-      `https://graph.facebook.com/v22.0/${CATALOG_ID}/products?fields=name,retailer_id,price,sale_price`,
+      `https://graph.facebook.com/v22.0/${CATALOG_ID}/products?fields=name,retailer_id,price`,
       { headers: { Authorization: `Bearer ${TOKEN}` } }
     );
 
     catalogCache = {};
 
     res.data.data.forEach(p => {
-      const original = extractPrice(p.price);
-      const sale = extractPrice(p.sale_price);
-
       catalogCache[p.retailer_id] = {
         name: p.name,
         id: p.name.toUpperCase().replace(/\s/g, "_"),
-        originalPrice: original || 500,
-        salePrice: sale || original || 500
+        basePrice: extractPrice(p.price) || 500
       };
     });
 
-    console.log("✅ Catalog loaded with discount");
+    console.log("✅ Catalog loaded");
   } catch (err) {
     console.log("❌ Catalog error:", err.response?.data || err.message);
   }
@@ -57,7 +54,7 @@ loadCatalog();
 setInterval(loadCatalog, 600000);
 
 /////////////////////////////////////////////////////
-// VERIFY
+// VERIFY WEBHOOK
 /////////////////////////////////////////////////////
 app.get("/webhook", (req, res) => {
   if (
@@ -70,7 +67,7 @@ app.get("/webhook", (req, res) => {
 });
 
 /////////////////////////////////////////////////////
-// WEBHOOK
+// MAIN WEBHOOK
 /////////////////////////////////////////////////////
 app.post("/webhook", async (req, res) => {
   try {
@@ -81,60 +78,70 @@ app.post("/webhook", async (req, res) => {
     processedMessages.add(message.id);
 
     const from = message.from;
+
     if (!users[from]) users[from] = {};
 
-    /////////////////////////////////////////////////////
-    // TEXT
-    /////////////////////////////////////////////////////
-    if (message.type === "text") {
-      const text = message.text.body.trim().toLowerCase();
+/////////////////////////////////////////////////////
+// TEXT
+/////////////////////////////////////////////////////
+if (message.type === "text") {
+  const rawText = message.text.body.trim().toLowerCase();
 
-      if (
-        ["menu", "start"].includes(text) ||
-        (["hi", "hello"].includes(text) && !users[from]?.step)
-      ) {
-        delete users[from];
+  // normalize repeated letters (hiii → hi, haai → hai)
+  const text = rawText
+    .replace(/i+/g, "i")
+    .replace(/a+/g, "a")
+    .replace(/o+/g, "o");
 
-        users[from] = { step: "START" };
+  const greetings = ["hi", "hello", "hai", "start", "menu"];
 
-        await sendText(
-          from,
-          "Welcome to Anumod Bakery! 🍞✨\nWe’re delighted to have you here. Enjoy our freshly baked treats made with love—your happiness is our sweetest recipe! 😊"
-        );
+  // 🔥 UPDATED GREETING LOGIC
+  if (greetings.includes(text)) {
+    delete users[from];
 
-        await sendCatalog(from);
-        return res.sendStatus(200);
-      }
+    users[from] = { step: "START" };
 
-      // MESSAGE
-      if (users[from].step === "ASK_MESSAGE") {
-        const user = users[from];
-        const item = user.items[user.currentIndex];
+    await sendText(
+      from,
+      "👋 Hey there! Welcome to *Anumod Bakery* 🍞✨\n\nWe’re delighted to have you here 😊\nEnjoy our freshly baked treats made with love ❤️\n\nLet’s get started! 🎉"
+    );
 
-        item.customMessage = text === "no" ? "" : text;
+    await sendCatalog(from);
+    return res.sendStatus(200);
+  }
 
-        user.currentIndex++;
+  /////////////////////////////////////////////////////
+  // MESSAGE
+  /////////////////////////////////////////////////////
+  if (users[from].step === "ASK_MESSAGE") {
+    const user = users[from];
+    const item = user.items[user.currentIndex];
 
-        if (user.currentIndex < user.items.length) {
-          user.step = "ASK_WEIGHT";
-          await askWeight(from);
-        } else {
-          user.step = "ASK_NAME";
-          await sendText(from, "👤 May I know your name, please? 😊");
-        }
+    item.customMessage = text === "no" ? "" : text;
 
-        return res.sendStatus(200);
-      }
+    user.currentIndex++;
 
-      // NAME
-      if (users[from].step === "ASK_NAME") {
-        users[from].customerName = text;
-        users[from].step = "ASK_DATE";
-        await askDate(from);
-        return res.sendStatus(200);
-      }
+    if (user.currentIndex < user.items.length) {
+      user.step = "ASK_WEIGHT";
+      await askWeight(from);
+    } else {
+      user.step = "ASK_NAME";
+      await sendText(from, "😊 May I know your name?");
     }
 
+    return res.sendStatus(200);
+  }
+
+  /////////////////////////////////////////////////////
+  // NAME
+  /////////////////////////////////////////////////////
+  if (users[from].step === "ASK_NAME") {
+    users[from].customerName = rawText; // keep original formatting for name
+    users[from].step = "ASK_DATE";
+    await askDate(from);
+    return res.sendStatus(200);
+  }
+}
     /////////////////////////////////////////////////////
     // ORDER
     /////////////////////////////////////////////////////
@@ -147,8 +154,7 @@ app.post("/webhook", async (req, res) => {
           name: product?.name || "Cake",
           quantity: item.quantity,
           weight: null,
-          originalPrice: product?.originalPrice || 500,
-          salePrice: product?.salePrice || 500,
+          basePrice: product?.basePrice || 500,
           customMessage: ""
         };
       });
@@ -175,10 +181,7 @@ app.post("/webhook", async (req, res) => {
       const user = users[from];
       if (!user || !user.step) return res.sendStatus(200);
 
-      // WEIGHT
       if (["1KG","2KG","3KG","4KG","5KG"].includes(id)) {
-        if (user.step !== "ASK_WEIGHT") return res.sendStatus(200);
-
         const item = user.items[user.currentIndex];
         item.weight = id.toLowerCase();
 
@@ -186,40 +189,61 @@ app.post("/webhook", async (req, res) => {
 
         await sendText(
           from,
-          `✨ Please type the message you’d like on your "${item.name}" cake 🎂  
-(Or type *no* to skip 😊)`
+          `🎂 Want to add a special message on your *${item.name}* cake?\n\nType your message or type *no* 😊`
         );
+
         return res.sendStatus(200);
       }
 
-      // DATE
       if (id.startsWith("DATE_")) {
-        if (user.step !== "ASK_DATE") return res.sendStatus(200);
-
         user.deliveryDate = id.replace("DATE_", "");
         user.step = "ASK_TIME";
-
         await askTime(from);
         return res.sendStatus(200);
       }
 
-      // TIME
       if (id.startsWith("TIME_")) {
-        if (user.step !== "ASK_TIME") return res.sendStatus(200);
-
         user.deliveryTime = id.replace("TIME_", "");
         user.step = "CONFIRM";
-
         await sendSummary(from);
         return res.sendStatus(200);
       }
 
-      // CONFIRM
+      /////////////////////////////////////////////////////
+      // CONFIRM ORDER (UPDATED WITH ERROR HANDLING)
+      /////////////////////////////////////////////////////
       if (id === "CONFIRM_ORDER") {
-        await sendText(
-          from,
-          "🎉 Your order has been placed successfully!\n\nOur team will reach out to you shortly for confirmation 📞\n\n💬 You can type *Hi* anytime to place another order 😊"
-        );
+        try {
+          for (const item of user.items) {
+            console.log("📤 Sending order:", item);
+
+            const response = await axios.post(process.env.ORDER_API, {
+              itemId: item.itemId,
+              customerNumber: user.phone,
+              customerName: user.customerName,
+              deliveryDate: user.deliveryDate,
+              deliveryTime: user.deliveryTime,
+              weight: item.weight,
+              message: item.customMessage
+            });
+
+            console.log("✅ API Response:", response.data);
+          }
+
+          await sendText(
+            from,
+            "🎉 *Yay! Your order is confirmed!* 🥳\n\nOur team will contact you shortly 😊\n\n👉 Type *Hi* anytime to place another order!"
+          );
+
+        } catch (e) {
+          console.log("❌ API ERROR:", e.response?.data || e.message);
+
+          await sendText(
+            from,
+            "⚠️ Oops! Something went wrong while placing your order.\nPlease try again or contact support."
+          );
+        }
+
         delete users[from];
       }
 
@@ -227,7 +251,7 @@ app.post("/webhook", async (req, res) => {
         delete users[from];
         await sendText(
           from,
-          "❌ Your order has been cancelled.\n\nNo worries! You can start again anytime by typing *Hi* 😊"
+          "❌ Your order has been cancelled. No worries! 😊\n\nType *Hi* whenever you're ready!"
         );
       }
     }
@@ -241,27 +265,19 @@ app.post("/webhook", async (req, res) => {
 });
 
 /////////////////////////////////////////////////////
-// DATE (FIXED)
+// DATE
 /////////////////////////////////////////////////////
 function getNextDates(days) {
   const arr = [];
   const now = new Date();
 
-  const istTime = new Date(
-    now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })
-  );
-
-  const hour = istTime.getHours();
-  const today = istTime.toISOString().split("T")[0];
-
-  if (hour < 12) {
-    arr.push(today);
+  if (now.getHours() < 12) {
+    arr.push(new Date().toISOString().split("T")[0]);
   }
 
   for (let i = 1; i <= days; i++) {
-    const d = new Date(istTime);
+    const d = new Date();
     d.setDate(d.getDate() + i);
-
     arr.push(d.toISOString().split("T")[0]);
   }
 
@@ -279,18 +295,13 @@ async function askDate(user) {
       type: "interactive",
       interactive: {
         type: "list",
-        body: { text: "📅 Please choose your preferred delivery date 🎉" },
+        body: { text: "📅 Please choose your preferred delivery date 😊" },
         action: {
           button: "Choose Date",
-          sections: [
-            {
-              title: "Available Dates",
-              rows: dates.map(d => ({
-                id: "DATE_" + d,
-                title: d
-              }))
-            }
-          ]
+          sections: [{
+            title: "Dates",
+            rows: dates.map(d => ({ id: "DATE_" + d, title: d }))
+          }]
         }
       }
     },
@@ -299,26 +310,19 @@ async function askDate(user) {
 }
 
 /////////////////////////////////////////////////////
-// TIME (FIXED)
+// TIME
 /////////////////////////////////////////////////////
 async function askTime(user) {
   const selectedDate = users[user].deliveryDate;
   const now = new Date();
+  const today = now.toISOString().split("T")[0];
+  const hour = now.getHours();
 
-const istTime = new Date(
-  now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })
-);
-
-const today = istTime.toISOString().split("T")[0];
-const hour = istTime.getHours();
   let times = [];
 
   if (selectedDate === today) {
     if (hour >= 12) {
-      await sendText(
-        user,
-        "⚠️ Oops! Same-day delivery is no longer available for today.\nPlease select another date 😊"
-      );
+      await sendText(user, "⚠️ Same-day delivery closed. Please choose another date 😊");
       users[user].step = "ASK_DATE";
       await askDate(user);
       return;
@@ -336,18 +340,13 @@ const hour = istTime.getHours();
       type: "interactive",
       interactive: {
         type: "list",
-        body: { text: "⏰ Choose a convenient delivery time for you ⏳" },
+        body: { text: "⏰ Pick a delivery time that works best for you 😊" },
         action: {
           button: "Choose Time",
-          sections: [
-            {
-              title: "Time Slots",
-              rows: times.map(t => ({
-                id: "TIME_" + t,
-                title: t
-              }))
-            }
-          ]
+          sections: [{
+            title: "Time Slots",
+            rows: times.map(t => ({ id: "TIME_" + t, title: t }))
+          }]
         }
       }
     },
@@ -356,40 +355,48 @@ const hour = istTime.getHours();
 }
 
 /////////////////////////////////////////////////////
-// REMAINING CODE UNCHANGED
+// PRICING
 /////////////////////////////////////////////////////
-
-function getPrices(item, weight) {
+function getPricingDetails(basePrice, weight) {
   const map = { "1kg":1,"2kg":2,"3kg":3,"4kg":4,"5kg":5 };
-  const m = map[weight] || 1;
+  const original = basePrice * (map[weight] || 1);
 
-  return {
-    original: item.originalPrice * m,
-    sale: item.salePrice * m
-  };
+  let discounted = original;
+  if (original >= 500) discounted = original - 50;
+
+  const saved = original - discounted;
+
+  return { original, discounted, saved };
 }
 
+/////////////////////////////////////////////////////
+// SUMMARY
+/////////////////////////////////////////////////////
 async function sendSummary(user) {
   const data = users[user];
 
   let total = 0;
-  let totalOriginal = 0;
+  let totalSaved = 0;
 
-  let text = "🧾 Here’s your order summary 🛍️\n\n";
+  let text = "🧾 *Here’s your order summary 🛍️*\n\n";
 
   data.items.forEach(i => {
-    const { original, sale } = getPrices(i, i.weight);
+    if (!i.weight || !i.basePrice) return;
 
-    const itemOriginalTotal = original * i.quantity;
-    const itemSaleTotal = sale * i.quantity;
+    const p = getPricingDetails(i.basePrice, i.weight);
 
-    total += itemSaleTotal;
-    totalOriginal += itemOriginalTotal;
+    const itemTotal = p.discounted * i.quantity;
+    const itemSaved = p.saved * i.quantity;
 
-    text += `${i.quantity} × ${i.name} (${i.weight}) - ₹${itemSaleTotal}\n`;
+    total += itemTotal;
+    totalSaved += itemSaved;
 
-    if (original !== sale) {
-      text += `💸 ₹${itemOriginalTotal} → ₹${itemSaleTotal}\n`;
+    text += `🍰 ${i.quantity} × ${i.name} (${i.weight})\n`;
+
+    if (p.saved > 0) {
+      text += `💸 ₹${p.original} → ₹${p.discounted}\n`;
+    } else {
+      text += `💸 ₹${p.original}\n`;
     }
 
     if (i.customMessage) {
@@ -399,15 +406,15 @@ async function sendSummary(user) {
     text += "\n";
   });
 
-  text += `📅 Date: ${data.deliveryDate}\n`;
-  text += `⏰ Time: ${data.deliveryTime}\n\n`;
-  text += `💰 Total: ₹${total}`;
+  text += `📅 Date: ${data.deliveryDate}`;
+  text += `\n⏰ Time: ${data.deliveryTime}`;
+  text += `\n\n💰 *Total: ₹${total}*`;
 
-  if (totalOriginal > total) {
-    text += `\n🎉 You saved ₹${totalOriginal - total}!`;
+  if (totalSaved > 0) {
+    text += `\n🎉 *You saved ₹${totalSaved}!*\n`;
   }
 
-  text += "\n\n👉 Please review your order and confirm below 😊";
+  text += `\n👇 Please review and confirm your order 😊`;
 
   await axios.post(
     `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`,
@@ -420,8 +427,8 @@ async function sendSummary(user) {
         body: { text },
         action: {
           buttons: [
-            { type: "reply", reply: { id: "CONFIRM_ORDER", title: "Confirm" } },
-            { type: "reply", reply: { id: "CANCEL_ORDER", title: "Cancel" } }
+            { type: "reply", reply: { id: "CONFIRM_ORDER", title: "Confirm ✅" } },
+            { type: "reply", reply: { id: "CANCEL_ORDER", title: "Cancel ❌" } }
           ]
         }
       }
@@ -430,6 +437,9 @@ async function sendSummary(user) {
   );
 }
 
+/////////////////////////////////////////////////////
+// SEND TEXT
+/////////////////////////////////////////////////////
 async function sendText(to, msg) {
   await axios.post(
     `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`,
@@ -442,6 +452,9 @@ async function sendText(to, msg) {
   );
 }
 
+/////////////////////////////////////////////////////
+// CATALOG
+/////////////////////////////////////////////////////
 async function sendCatalog(to) {
   await axios.post(
     `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`,
@@ -451,7 +464,7 @@ async function sendCatalog(to) {
       type: "interactive",
       interactive: {
         type: "catalog_message",
-        body: { text: "🍰 Explore our delicious cake collection and pick your favorite 😍" },
+        body: { text: "🍰 Browse our delicious cakes & pick your favorite 😍" },
         action: { name: "catalog_message" }
       }
     },
@@ -459,6 +472,9 @@ async function sendCatalog(to) {
   );
 }
 
+/////////////////////////////////////////////////////
+// WEIGHT
+/////////////////////////////////////////////////////
 async function askWeight(user) {
   const item = users[user].items[users[user].currentIndex];
 
@@ -470,25 +486,28 @@ async function askWeight(user) {
       type: "interactive",
       interactive: {
         type: "list",
-        body: { text: `🎂 Please choose the weight for your "${item.name}" cake 🎉` },
+        body: { text: `🎂 Choose the weight for your *${item.name}* cake 😊` },
         action: {
           button: "Choose",
-          sections: [
-            {
-              title: "Available Weights",
-              rows: [
-                { id: "1KG", title: "1 KG" },
-                { id: "2KG", title: "2 KG" },
-                { id: "3KG", title: "3 KG" },
-                { id: "4KG", title: "4 KG" },
-                { id: "5KG", title: "5 KG" }
-              ]
-            }
-          ]
+          sections: [{
+            title: "Weights",
+            rows: [
+              { id: "1KG", title: "1 KG" },
+              { id: "2KG", title: "2 KG" },
+              { id: "3KG", title: "3 KG" },
+              { id: "4KG", title: "4 KG" },
+              { id: "5KG", title: "5 KG" }
+            ]
+          }]
         }
       }
     },
     { headers: { Authorization: `Bearer ${TOKEN}` } }
   );
 }
+
+/////////////////////////////////////////////////////
+// START
+/////////////////////////////////////////////////////
+const PORT = process.env.PORT || 1000;
 app.listen(PORT, () => console.log(`🚀 Running on ${PORT}`));
