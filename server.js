@@ -9,9 +9,11 @@ const TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const CATALOG_ID = process.env.CATALOG_ID;
+const CATALOG_API = process.env.CATALOG_API;
 
 let users = {};
 let catalogCache = {};
+let catalogLoaded = false;
 const processedMessages = new Set();
 
 /////////////////////////////////////////////////////
@@ -65,9 +67,7 @@ async function checkAndExpireSession(from) {
       lastStep: user.step,
       inactiveMinutes: Math.floor(inactive / 60000)
     });
-
     delete users[from];
-
     await sendText(
       from,
       "⏰ *Session Expired!*\n\nYour order session timed out due to 10 minutes of inactivity.\n\nType *Hi* to start a new order anytime 😊"
@@ -84,7 +84,6 @@ setInterval(async () => {
     const user = users[from];
     if (!user.step || user.step === "START") continue;
     if (!user.lastActivity) continue;
-
     const inactive = now - user.lastActivity;
     if (inactive >= SESSION_TIMEOUT_MS) {
       log("SESSION", `Auto-expiring session for ${from}`, { lastStep: user.step });
@@ -110,40 +109,141 @@ setInterval(() => {
 }, 600000);
 
 /////////////////////////////////////////////////////
-// LOAD CATALOG
+// LOAD CATALOG FROM CATALOG API
 /////////////////////////////////////////////////////
 async function loadCatalog() {
   try {
-    const res = await axios.get(
-      `https://graph.facebook.com/v22.0/${CATALOG_ID}/products?fields=name,retailer_id,price`,
-      { headers: { Authorization: `Bearer ${TOKEN}` } }
-    );
+    const res = await axios.get(CATALOG_API);
+    const raw = res.data;
+    const products = raw.catalog || raw.data || raw.products || (Array.isArray(raw) ? raw : []);
 
     catalogCache = {};
-    res.data.data.forEach(p => {
-      catalogCache[p.retailer_id] = {
-        name: p.name,
-        id: p.name.toUpperCase().replace(/\s/g, "_"),
-        basePrice: extractPrice(p.price) || 500
+
+    products.forEach(p => {
+      const uuid         = p.id;
+      const name         = p.title || "Cake";
+      const eggPrice     = p.per_kg_price || 0;
+      const egglessPrice = p.per_kg_eggless_price || 0;
+      const salePrice    = p.sale_price || 0; // only > 0 if real discount exists
+
+      // EGG variant — indexed by "uuid_EGG" (WhatsApp retailer_id format)
+      if (eggPrice > 0) {
+        catalogCache[`${uuid}_EGG`] = {
+          itemId:      uuid,
+          name,
+          basePrice:   eggPrice,
+          salePrice,
+          dietaryType: "EGG"
+        };
+      }
+
+      // EGGLESS variant — indexed by "uuid_EGGLESS"
+      if (egglessPrice > 0) {
+        catalogCache[`${uuid}_EGGLESS`] = {
+          itemId:      uuid,
+          name,
+          basePrice:   egglessPrice,
+          salePrice,
+          dietaryType: "EGGLESS"
+        };
+      }
+
+      // Clean UUID fallback
+      catalogCache[uuid] = {
+        itemId:      uuid,
+        name,
+        basePrice:   eggPrice || egglessPrice,
+        salePrice,
+        dietaryType: eggPrice > 0 ? "EGG" : "EGGLESS"
       };
     });
 
-    log("INFO", "Catalog loaded", {
-      productCount: Object.keys(catalogCache).length,
-      products: Object.values(catalogCache).map(p => `${p.name} — ₹${p.basePrice}`)
-    });
+    catalogLoaded = Object.keys(catalogCache).length > 0;
+
+    log("INFO", "Catalog loaded from API", {
+  productCount: products.length,
+  variantCount: Object.keys(catalogCache).length
+});
   } catch (err) {
+    catalogLoaded = false;
     log("ERROR", "Catalog load failed", { error: err.response?.data || err.message });
   }
 }
 
-function extractPrice(p) {
-  if (!p) return null;
-  return parseFloat(p.replace(/[^\d.]/g, ""));
-}
-
 loadCatalog();
 setInterval(loadCatalog, 600000);
+
+/////////////////////////////////////////////////////
+// CATALOGUE CSV ENDPOINT
+/////////////////////////////////////////////////////
+app.get("/catalogue.csv", async (req, res) => {
+  try {
+    const response = await axios.get(CATALOG_API);
+    const raw = response.data;
+    const products = raw.catalog || raw.data || raw.products || (Array.isArray(raw) ? raw : []);
+
+    log("INFO", `Catalogue API loaded ${products.length} products`);
+
+    const csvHeader = [
+      "id", "title", "description", "availability", "condition",
+      "price", "link", "image_link", "brand", "sale_price",
+      "item_group_id", "material", "product_type"
+    ].join(",");
+
+    const csvRows = [];
+
+    products.forEach(product => {
+      const uuid         = product.id;
+      const title        = (product.title || "").replace(/"/g, "'");
+      const desc         = (product.description || product.title || "").replace(/"/g, "'");
+      const link         = product.website_link || "https://xspine.in";
+      const image        = product.image_link || "";
+      const avail        = product.availability || "in stock";
+      const eggPrice     = product.per_kg_price || 0;
+      const egglessPrice = product.per_kg_eggless_price || 0;
+      const category     = product.category?.name || "General Cakes";
+
+      if (eggPrice > 0) {
+        csvRows.push([
+          `${uuid}_EGG`, `"${title}"`, `"${desc}"`, avail, "new",
+          `${eggPrice}.00 INR`, link, image, '"Anumod Bakery"',
+          "", uuid, "EGG", `"${category}"`
+        ].join(","));
+      }
+
+      if (egglessPrice > 0) {
+        csvRows.push([
+          `${uuid}_EGGLESS`, `"${title}"`, `"${desc}"`, avail, "new",
+          `${egglessPrice}.00 INR`, link, image, '"Anumod Bakery"',
+          "", uuid, "EGGLESS", `"${category}"`
+        ].join(","));
+      }
+    });
+
+    const csv = [csvHeader, ...csvRows].join("\n");
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", "attachment; filename=catalogue.csv");
+    res.send(csv);
+
+    log("INFO", `Catalogue CSV served: ${csvRows.length} rows for ${products.length} products`);
+
+  } catch (err) {
+    log("ERROR", "Catalogue CSV error", { error: err.response?.data || err.message });
+    res.status(500).send("Error generating catalogue CSV");
+  }
+});
+
+/////////////////////////////////////////////////////
+// REFRESH CATALOG ENDPOINT
+/////////////////////////////////////////////////////
+app.get("/refresh-catalog", async (req, res) => {
+  await loadCatalog();
+  res.json({
+    success: true,
+    products: Object.keys(catalogCache).length,
+    message: "Catalog refreshed successfully"
+  });
+});
 
 /////////////////////////////////////////////////////
 // VERIFY WEBHOOK
@@ -177,7 +277,6 @@ app.post("/webhook", async (req, res) => {
     const from = message.from;
     const contactName = entry?.contacts?.[0]?.profile?.name || "Unknown";
 
-    // Log every incoming message
     log("IN", `Message from ${contactName} (${from})`, {
       type: message.type,
       content:
@@ -190,11 +289,9 @@ app.post("/webhook", async (req, res) => {
 
     if (!users[from]) users[from] = {};
 
-    // Check and expire session if inactive
     const expired = await checkAndExpireSession(from);
     if (expired) return res.sendStatus(200);
 
-    // Update activity timestamp for active sessions
     if (users[from].step && users[from].step !== "START") {
       users[from].lastActivity = Date.now();
     }
@@ -219,16 +316,12 @@ app.post("/webhook", async (req, res) => {
       // ── GREETING ──────────────────────────────────────
       if (greetings.includes(normalizedText)) {
 
-        // If mid-order, warn user instead of silently restarting
         if (
           users[from].step &&
           users[from].step !== "START" &&
           users[from].step !== "CONFIRM"
         ) {
-          log("INFO", `Mid-order Hi attempt by ${contactName}`, {
-            currentStep: users[from].step
-          });
-
+          log("INFO", `Mid-order Hi attempt by ${contactName}`, { currentStep: users[from].step });
           await sendText(
             from,
             "⚠️ You have an order in progress!\n\nType *cancel* to cancel your current order and start a new one, or continue with your current order 😊"
@@ -236,7 +329,15 @@ app.post("/webhook", async (req, res) => {
           return res.sendStatus(200);
         }
 
-        // Fresh start
+        if (!catalogLoaded) {
+          log("INFO", `Catalog not ready, informed ${contactName}`);
+          await sendText(
+            from,
+            "🍰 *Welcome to Anumod Bakery!* ✨\n\nOur product menu is being updated right now 🔄\n\nPlease try again in a few minutes — we'll be ready to take your order very soon! 😊"
+          );
+          return res.sendStatus(200);
+        }
+
         users[from] = { step: "START", lastActivity: Date.now() };
         log("INFO", `New session started for ${contactName} (${from})`);
 
@@ -244,12 +345,11 @@ app.post("/webhook", async (req, res) => {
           from,
           "👋 Hey there! Welcome to *Anumod Bakery* 🍞✨\n\nWe're delighted to have you here 😊\nEnjoy our freshly baked treats made with love ❤️\n\nLet's get started! 🎉"
         );
-
         await sendCatalog(from);
         return res.sendStatus(200);
       }
 
-      // ── CANCEL KEYWORD ────────────────────────────────
+      // ── CANCEL ────────────────────────────────────────
       if (lowerText === "cancel") {
         if (users[from].step && users[from].step !== "START") {
           log("INFO", `Order cancelled via text by ${contactName}`);
@@ -269,7 +369,9 @@ app.post("/webhook", async (req, res) => {
         const user = users[from];
         const item = user.items[user.currentIndex];
 
-        item.customMessage = lowerText === "no" ? "" : rawText;
+        // rawText preserves original casing e.g. "Happy Birthday"
+        // "no" → null so API receives null not empty string
+        item.customMessage = lowerText === "no" ? null : rawText;
 
         log("INFO", `Cake message set`, {
           item: item.name,
@@ -324,20 +426,40 @@ app.post("/webhook", async (req, res) => {
     // ORDER (from WhatsApp catalog)
     /////////////////////////////////////////////////////
     if (message.type === "order") {
+      if (!catalogLoaded) {
+        await sendText(
+          from,
+          "🍰 Our product menu is being updated right now 🔄\n\nPlease try again in a few minutes! 😊"
+        );
+        return res.sendStatus(200);
+      }
+
       const cart = message.order.product_items.map(item => {
-        const product = catalogCache[item.product_retailer_id];
+        const retailerId = item.product_retailer_id;
+        const product    = catalogCache[retailerId];
+
+        log("INFO", `Cart item lookup`, {
+          retailer_id:  retailerId,
+          foundInCache: !!product,
+          productName:  product?.name,
+          dietaryType:  product?.dietaryType,
+          pricePerKg:   product?.basePrice
+        });
+
         return {
-          itemId: product?.id || "CAKE",
-          name: product?.name || "Cake",
-          quantity: item.quantity,
-          weight: null,
-          basePrice: product?.basePrice || 500,
-          customMessage: ""
+          itemId:        product?.itemId || retailerId.replace(/_(EGG|EGGLESS)$/i, ""),
+          name:          product?.name   || retailerId,
+          qty:           item.quantity,
+          weight:        null,
+          basePrice:     product?.basePrice || 500,
+          salePrice:     product?.salePrice || 0,
+          dietaryType:   product?.dietaryType || null,
+          customMessage: null
         };
       });
 
       log("INFO", `Cart received from ${contactName}`, {
-        items: cart.map(i => `${i.quantity}x ${i.name} @ ₹${i.basePrice}`)
+        items: cart.map(i => `${i.qty}x ${i.name} @ ₹${i.basePrice} | ${i.dietaryType || "UNKNOWN"}`)
       });
 
       users[from] = {
@@ -377,7 +499,7 @@ app.post("/webhook", async (req, res) => {
       // ── WEIGHT ────────────────────────────────────────
       if (["1KG", "2KG", "3KG", "4KG", "5KG"].includes(id)) {
         const item = user.items[user.currentIndex];
-        item.weight = id.toLowerCase();
+        item.weight = parseInt(id.replace("KG", ""), 10);
 
         log("INFO", `Weight selected`, { item: item.name, weight: item.weight });
 
@@ -412,14 +534,24 @@ app.post("/webhook", async (req, res) => {
         try {
           for (const item of user.items) {
             const payload = {
-              itemId: item.itemId,
-              customerNumber: user.phone,
-              customerName: user.customerName,
-              deliveryDate: user.deliveryDate,
-              deliveryTime: user.deliveryTime,
-              weight: item.weight,
-              quantity: item.quantity,
-              message: item.customMessage
+              itemId:               item.itemId,
+              customerName:         user.customerName,
+              customerNumber:       user.phone,
+              deliveryDate:         user.deliveryDate,
+              deliveryTime:         user.deliveryTime,
+              weight:               item.weight,
+              qty:                  item.qty,
+              source:               "WHATSAPP",
+              dieteryType:          item.dietaryType,
+              customerMessage:      item.customMessage,
+              flavourId:            null,
+              shape:                null,
+              customisationMessage: null,
+              fondantCake:          null,
+              fondantDieteryType:   null,
+              cupCakes:             null,
+              cupcakeDieteryType:   null,
+              photoSheets:          null
             };
 
             log("API", `Sending to Order API`, payload);
@@ -434,11 +566,11 @@ app.post("/webhook", async (req, res) => {
 
           await sendText(
             from,
-            "🎉 *Yay! Your order is confirmed!* 🥳\n\nOur team will contact you shortly 😊\n\n👉 Type *Hi* anytime to place another order!"
+            "🎉 *Order received successfully!* 🧾\n\nOur team is processing your order and will contact you shortly 📞\n\n👉 Type *Hi* anytime to place another order 😊"
           );
 
           log("INFO", `✅ Order completed for ${contactName}`, {
-            items: user.items.map(i => `${i.quantity}x ${i.name} (${i.weight})`),
+            items: user.items.map(i => `${i.qty}x ${i.name} (${i.weight}kg) [${i.dietaryType || "N/A"}]`),
             date: user.deliveryDate,
             time: user.deliveryTime,
             name: user.customerName,
@@ -450,7 +582,6 @@ app.post("/webhook", async (req, res) => {
             error: e.response?.data || e.message,
             status: e.response?.status
           });
-
           await sendText(
             from,
             "⚠️ Oops! Something went wrong while placing your order.\nPlease try again or contact us directly."
@@ -489,19 +620,16 @@ function getNextDates(days) {
   const todayIST = getTodayIST();
   const hourIST = getISTHour();
 
-  // Show today only before 12 PM IST
-  if (hourIST < 12) {
-    arr.push(todayIST);
-  }
+  if (hourIST < 12) arr.push(todayIST);
 
   const ist = getISTDate();
   for (let i = 1; i <= days; i++) {
     const d = new Date(ist.getTime());
     d.setUTCDate(d.getUTCDate() + i);
-    const y = d.getUTCFullYear();
+    const y  = d.getUTCFullYear();
     const mo = String(d.getUTCMonth() + 1).padStart(2, "0");
-    const day = String(d.getUTCDate()).padStart(2, "0");
-    arr.push(`${y}-${mo}-${day}`);
+    const dy = String(d.getUTCDate()).padStart(2, "0");
+    arr.push(`${y}-${mo}-${dy}`);
   }
 
   log("INFO", "Dates generated", { hourIST, todayShown: hourIST < 12, dates: arr });
@@ -585,21 +713,21 @@ async function askTime(user) {
 }
 
 /////////////////////////////////////////////////////
-// PRICING — ₹50 per kg discount
+// PRICING
+// basePrice = per-kg rate for chosen variant (EGG or EGGLESS)
+// salePrice = discounted per-kg rate — only shown if > 0
 /////////////////////////////////////////////////////
-function getPricingDetails(basePrice, weight, quantity) {
-  const kgMap = { "1kg": 1, "2kg": 2, "3kg": 3, "4kg": 4, "5kg": 5 };
-  const kg = kgMap[weight] || 1;
+function getPricingDetails(basePrice, salePrice, weight, qty) {
+  const kg           = weight || 1;
+  const originalTotal = basePrice * kg * qty;
 
-  const pricePerPiece = basePrice * kg;
-  const discountPerPiece = pricePerPiece >= 500 ? 50 * kg : 0;
-  const discountedPerPiece = pricePerPiece - discountPerPiece;
+  if (salePrice > 0) {
+    const discountedTotal = salePrice * kg * qty;
+    const savedTotal      = originalTotal - discountedTotal;
+    return { originalTotal, discountedTotal, savedTotal, hasDiscount: true };
+  }
 
-  const originalTotal = pricePerPiece * quantity;
-  const discountedTotal = discountedPerPiece * quantity;
-  const savedTotal = originalTotal - discountedTotal;
-
-  return { pricePerPiece, discountedPerPiece, originalTotal, discountedTotal, savedTotal };
+  return { originalTotal, discountedTotal: originalTotal, savedTotal: 0, hasDiscount: false };
 }
 
 /////////////////////////////////////////////////////
@@ -613,16 +741,18 @@ async function sendSummary(user) {
 
   data.items.forEach(i => {
     if (!i.weight || !i.basePrice) return;
-    const p = getPricingDetails(i.basePrice, i.weight, i.quantity);
+    const p = getPricingDetails(i.basePrice, i.salePrice || 0, i.weight, i.qty);
     grandTotal += p.discountedTotal;
     grandSaved += p.savedTotal;
 
-    text += `🍰 ${i.quantity} × ${i.name} (${i.weight})\n`;
-    if (p.savedTotal > 0) {
+    text += `🍰 ${i.qty} × ${i.name} (${i.weight}kg)${i.dietaryType ? " | " + i.dietaryType : ""}\n`;
+
+    if (p.hasDiscount) {
       text += `💸 ₹${p.originalTotal} → ₹${p.discountedTotal} *(Save ₹${p.savedTotal})*\n`;
     } else {
       text += `💸 ₹${p.originalTotal}\n`;
     }
+
     if (i.customMessage) text += `📝 "${i.customMessage}"\n`;
     text += "\n";
   });
