@@ -500,7 +500,7 @@ app.post("/webhook", async (req, res) => {
         user.step = "ASK_MESSAGE";
         await sendText(
           from,
-          `🎂 Want to add a special message on your *${item.name}* cake?\n\nType your message or type *no* 😊`
+          `🎂 Want to add a special message on your *${item.name}${item.dietaryType ? " (" + item.dietaryType + ")" : ""}* cake?\n\nType your message or type *no* 😊`
         );
         return res.sendStatus(200);
       }
@@ -832,7 +832,7 @@ async function askWeight(user) {
       type: "interactive",
       interactive: {
         type: "list",
-        body: { text: `🎂 Choose the weight for your *${item.name}* cake 😊` },
+        body: { text: `🎂 Choose the weight for your *${item.name}${item.dietaryType ? " (" + item.dietaryType + ")" : ""}* cake 😊` },
         action: {
           button: "Choose Weight",
           sections: [{
