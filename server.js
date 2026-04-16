@@ -124,9 +124,8 @@ async function loadCatalog() {
       const name         = p.title || "Cake";
       const eggPrice     = p.per_kg_price || 0;
       const egglessPrice = p.per_kg_eggless_price || 0;
-      const salePrice    = p.sale_price || 0; // only > 0 if real discount exists
+      const salePrice    = p.sale_price || 0;
 
-      // EGG variant — indexed by "uuid_EGG" (WhatsApp retailer_id format)
       if (eggPrice > 0) {
         catalogCache[`${uuid}_EGG`] = {
           itemId:      uuid,
@@ -137,7 +136,6 @@ async function loadCatalog() {
         };
       }
 
-      // EGGLESS variant — indexed by "uuid_EGGLESS"
       if (egglessPrice > 0) {
         catalogCache[`${uuid}_EGGLESS`] = {
           itemId:      uuid,
@@ -148,7 +146,6 @@ async function loadCatalog() {
         };
       }
 
-      // Clean UUID fallback
       catalogCache[uuid] = {
         itemId:      uuid,
         name,
@@ -161,9 +158,9 @@ async function loadCatalog() {
     catalogLoaded = Object.keys(catalogCache).length > 0;
 
     log("INFO", "Catalog loaded from API", {
-  productCount: products.length,
-  variantCount: Object.keys(catalogCache).length
-});
+      productCount: products.length,
+      variantCount: Object.keys(catalogCache).length
+    });
   } catch (err) {
     catalogLoaded = false;
     log("ERROR", "Catalog load failed", { error: err.response?.data || err.message });
@@ -225,7 +222,7 @@ app.get("/catalogue.csv", async (req, res) => {
     res.setHeader("Content-Disposition", "attachment; filename=catalogue.csv");
     res.send(csv);
 
-    log("INFO", `Catalogue CSV served: ${csvRows.length} rows for ${products.length} products`);
+    log("INFO", `Catalogue CSV served: ${csvRows.length} rows`);
 
   } catch (err) {
     log("ERROR", "Catalogue CSV error", { error: err.response?.data || err.message });
@@ -315,7 +312,6 @@ app.post("/webhook", async (req, res) => {
 
       // ── GREETING ──────────────────────────────────────
       if (greetings.includes(normalizedText)) {
-
         if (
           users[from].step &&
           users[from].step !== "START" &&
@@ -369,8 +365,6 @@ app.post("/webhook", async (req, res) => {
         const user = users[from];
         const item = user.items[user.currentIndex];
 
-        // rawText preserves original casing e.g. "Happy Birthday"
-        // "no" → null so API receives null not empty string
         item.customMessage = lowerText === "no" ? null : rawText;
 
         log("INFO", `Cake message set`, {
@@ -529,40 +523,45 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // ── CONFIRM ORDER ─────────────────────────────────
+      // ── CONFIRM ORDER — SINGLE API CALL WITH ALL ITEMS ─
       if (id === "CONFIRM_ORDER") {
         try {
-          for (const item of user.items) {
-            const payload = {
-              itemId:               item.itemId,
-              customerName:         user.customerName,
-              customerNumber:       user.phone,
-              deliveryDate:         user.deliveryDate,
-              deliveryTime:         user.deliveryTime,
-              weight:               item.weight,
-              qty:                  item.qty,
-              source:               "WHATSAPP",
-              dieteryType:          item.dietaryType,
-              customerMessage:      item.customMessage,
-              flavourId:            null,
-              shape:                null,
-              customisationMessage: null,
-              fondantCake:          null,
-              fondantDieteryType:   null,
-              cupCakes:             null,
-              cupcakeDieteryType:   null,
-              photoSheets:          null
-            };
 
-            log("API", `Sending to Order API`, payload);
+          // Build items array — one entry per cake
+          const itemsPayload = user.items.map(item => ({
+            itemId:               item.itemId,
+            flavourId:            null,
+            weight:               item.weight,
+            qty:                  item.qty,
+            dieteryType:          item.dietaryType,
+            shape:                null,
+            customerMessage:      item.customMessage,
+            customisationMessage: null,
+            fondantCake:          null,
+            fondantDieteryType:   null,
+            cupCakes:             null,
+            cupcakeDieteryType:   null,
+            photoSheets:          null
+          }));
 
-            const response = await axios.post(process.env.ORDER_API, payload);
+          // Single payload with all items
+          const payload = {
+            customerName:   user.customerName,
+            customerNumber: user.phone,
+            deliveryDate:   user.deliveryDate,
+            deliveryTime:   user.deliveryTime,
+            source:         "WHATSAPP",
+            items:          itemsPayload
+          };
 
-            log("API", `Order API response`, {
-              status: response.status,
-              data: response.data
-            });
-          }
+          log("API", `Sending single order with ${itemsPayload.length} item(s) to API`, payload);
+
+          const response = await axios.post(process.env.ORDER_API, payload);
+
+          log("API", `Order API response`, {
+            status: response.status,
+            data:   response.data
+          });
 
           await sendText(
             from,
@@ -570,16 +569,17 @@ app.post("/webhook", async (req, res) => {
           );
 
           log("INFO", `✅ Order completed for ${contactName}`, {
-            items: user.items.map(i => `${i.qty}x ${i.name} (${i.weight}kg) [${i.dietaryType || "N/A"}]`),
-            date: user.deliveryDate,
-            time: user.deliveryTime,
-            name: user.customerName,
-            phone: user.phone
+            totalItems:  user.items.length,
+            items:       user.items.map(i => `${i.qty}x ${i.name} (${i.weight}kg) [${i.dietaryType || "N/A"}]`),
+            date:        user.deliveryDate,
+            time:        user.deliveryTime,
+            name:        user.customerName,
+            phone:       user.phone
           });
 
         } catch (e) {
           log("ERROR", "Order API call failed", {
-            error: e.response?.data || e.message,
+            error:  e.response?.data || e.message,
             status: e.response?.status
           });
           await sendText(
@@ -714,11 +714,9 @@ async function askTime(user) {
 
 /////////////////////////////////////////////////////
 // PRICING
-// basePrice = per-kg rate for chosen variant (EGG or EGGLESS)
-// salePrice = discounted per-kg rate — only shown if > 0
 /////////////////////////////////////////////////////
 function getPricingDetails(basePrice, salePrice, weight, qty) {
-  const kg           = weight || 1;
+  const kg            = weight || 1;
   const originalTotal = basePrice * kg * qty;
 
   if (salePrice > 0) {
